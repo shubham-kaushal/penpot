@@ -53,7 +53,7 @@
 (sv/defmethod ::duplicate-file
   [{:keys [pool] :as cfg} {:keys [profile-id] :as params}]
   (db/with-atomic [conn pool]
-    ;; TODO: permission checks
+    (proj/check-edition-permissions! conn profile-id project-id)
     (duplicate-file conn params)))
 
 (defn duplicate-file
@@ -62,7 +62,8 @@
         flibs  (db/query conn :file-library-rel {:file-id file-id})
         fmeds  (db/query conn :file-media-object {:file-id file-id})
 
-        file   (assoc file :id (uuid/next))
+        file   (assoc file
+                      :id (uuid/next))
         file   (cond-> file
                  (some? project-id)
                  (assoc :project-id project-id))
@@ -116,7 +117,11 @@
         params  (assoc params :project-id (:id project))]
 
     (db/insert! conn :project project)
-
+    (db/insert! conn :project-profile-rel {:project-id (:id project)
+                                           :profile-id profile-id
+                                           :is-owner true
+                                           :is-admin true
+                                           :can-edit true})
     (doseq [id (map :id files)]
       (duplicate-file conn (assoc params :file-id id)))
 
