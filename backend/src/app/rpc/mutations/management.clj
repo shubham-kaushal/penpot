@@ -10,20 +10,17 @@
 (ns app.rpc.mutations.management
   "Move & Duplicate RPC methods for files and projects."
   (:require
-   [app.common.exceptions :as ex]
-   [app.common.pages :as cp]
+   [app.common.data :as d]
    [app.common.pages.migrations :as pmg]
    [app.common.spec :as us]
    [app.common.uuid :as uuid]
-   [app.config :as cfg]
    [app.db :as db]
-   [app.rpc.queries.files :as files]
    [app.rpc.queries.projects :as proj]
-   [app.tasks :as tasks]
+   [app.rpc.queries.teams :as teams]
    [app.util.blob :as blob]
    [app.util.services :as sv]
-   [app.util.time :as dt]
-   [clojure.spec.alpha :as s]))
+   [clojure.spec.alpha :as s]
+   [clojure.walk :as walk]))
 
 (s/def ::id ::us/uuid)
 (s/def ::profile-id ::us/uuid)
@@ -31,16 +28,93 @@
 (s/def ::file-id ::us/uuid)
 (s/def ::team-id ::us/uuid)
 
-(defn- remap-ids
-  [index keys items]
-  (letfn [(remap-key [item key]
-            (cond-> item
-              (contains? item key)
-              (assoc key (get index (get item key) (get item key)))))
+(defn- remap-id
+  [item index key]
+  (cond-> item
+    (contains? item key)
+    (assoc key (get index (get item key) (get item key)))))
 
-          (remap-keys [item]
-            (reduce remap-key item keys))]
-    (map remap-keys items)))
+(defn- process-file
+  [file index]
+  (letfn [;; A function responsible to analize all file data and
+          ;; replace the old :component-file reference with the new
+          ;; ones, using the provided file-index
+          (relink-components [data]
+            (walk/postwalk (fn [form]
+                             (cond-> form
+                               (and (map? form) (uuid? (:component-file form)))
+                               (update :component-file #(get index % %))))
+                           data))
+
+          ;; A function responsible of process the :media attr of file
+          ;; data and remap the old ids with the new ones.
+          (relink-media [media]
+            (reduce-kv (fn [res k v]
+                         (let [id (get index k)]
+                           (if (uuid? id)
+                             (-> res
+                                 (assoc id (assoc v :id id))
+                                 (dissoc k))
+                             res)))
+                       media
+                       media))]
+
+    (update file :data
+            (fn [data]
+              (-> data
+                  (blob/decode)
+                  (pmg/migrate-data)
+                  (update :pages-index relink-components)
+                  (update :components relink-components)
+                  (update :media relink-media)
+                  (d/without-nils)
+                  (blob/encode))))))
+
+(defn- duplicate-file
+  [conn {:keys [profile-id file index project-id]} {:keys [reset-shared-flag] :as opts}]
+  (let [flibs  (db/query conn :file-library-rel {:file-id (:id file)})
+        fmeds  (db/query conn :file-media-object {:file-id (:id file)})
+
+        ;; Remap all file-librar-rel rows to the new file id
+        flibs  (map #(remap-id % index :file-id) flibs)
+
+        ;; Add to the index all non-local file media objects
+        index  (reduce #(assoc %1 (:id %2) (uuid/next))
+                       index
+                       (remove :is-local fmeds))
+
+        ;; Remap all file-media-object rows and assing correct new id
+        ;; to each row
+        fmeds  (->> fmeds
+                    (map #(assoc % :id (or (get index (:id %)) (uuid/next))))
+                    (map #(remap-id % index :file-id)))
+
+        file   (cond-> file
+                 (some? project-id)
+                 (assoc :project-id project-id)
+
+                 (true? reset-shared-flag)
+                 (assoc :is-shared false))
+
+        file   (-> file
+                   (update :id #(get index %))
+                   (process-file index))]
+
+    (db/insert! conn :file file)
+    (db/insert! conn :file-profile-rel
+                {:file-id (:id file)
+                 :profile-id profile-id
+                 :is-owner true
+                 :is-admin true
+                 :can-edit true})
+
+    (doseq [params flibs]
+      (db/insert! conn :file-library-rel params))
+
+    (doseq [params fmeds]
+      (db/insert! conn :file-media-object params))
+
+    file))
 
 
 ;; --- MUTATION: Duplicate File
@@ -51,50 +125,17 @@
   (s/keys :req-un [::profile-id ::file-id]))
 
 (sv/defmethod ::duplicate-file
-  [{:keys [pool] :as cfg} {:keys [profile-id] :as params}]
+  [{:keys [pool] :as cfg} {:keys [profile-id file-id] :as params}]
   (db/with-atomic [conn pool]
-    (proj/check-edition-permissions! conn profile-id project-id)
-    (duplicate-file conn params)))
+    (let [file   (db/get-by-id conn :file file-id)
+          index  {file-id (uuid/next)}
+          params (assoc params :index index :file file)]
+      (proj/check-edition-permissions! conn profile-id (:project-id file))
+      (-> (duplicate-file conn params {:reset-shared-flag true})
+          (update :data blob/decode)))))
 
-(defn duplicate-file
-  [conn {:keys [file-id profile-id project-id]}]
-  (let [file   (db/get-by-id conn :file file-id)
-        flibs  (db/query conn :file-library-rel {:file-id file-id})
-        fmeds  (db/query conn :file-media-object {:file-id file-id})
 
-        file   (assoc file
-                      :id (uuid/next))
-        file   (cond-> file
-                 (some? project-id)
-                 (assoc :project-id project-id))
-
-        index  {file-id (:id file)}
-
-        flibs  (->> flibs
-                    (remap-ids index #{:file-id}))
-
-        fmeds  (->> fmeds
-                    (map #(assoc % :id (uuid/next)))
-                    (remap-ids index #{:file-id}))
-
-        fprof  {:file-id (:id file)
-                :profile-id profile-id
-                :is-owner true
-                :is-admin true
-                :can-edit true}]
-
-    (db/insert! conn :file file)
-    (db/insert! conn :file-profile-rel fprof)
-
-    (doseq [params flibs]
-      (db/insert! conn :file-library-rel params))
-
-    (doseq [params fmeds]
-      (db/insert! conn :file-media-object params))
-
-    file))
-
-;; --- MUTATION: Duplicate File
+;; --- MUTATION: Duplicate Project
 
 (declare duplicate-project)
 
@@ -102,19 +143,23 @@
   (s/keys :req-un [::profile-id ::project-id]))
 
 (sv/defmethod ::duplicate-project
-  [{:keys [pool] :as cfg} {:keys [profile-id] :as params}]
+  [{:keys [pool] :as cfg} {:keys [profile-id project-id] :as params}]
   (db/with-atomic [conn pool]
-    ;; TODO: permission checks
-    (duplicate-project conn params)))
+    (let [project (db/get-by-id conn :project project-id)]
+      (teams/check-edition-permissions! conn profile-id (:team-id project))
+      (duplicate-project conn (assoc params :project project)))))
 
 (defn duplicate-project
-  [conn {:keys [project-id profile-id] :as params}]
-  (let [project (db/get-by-id conn :project project-id)
-        files   (db/query conn :file
-                          {:project-id project-id}
+  [conn {:keys [profile-id project] :as params}]
+  (let [files   (db/query conn :file
+                          {:project-id (:id project)}
                           {:columns [:id]})
+
+        index   (reduce #(assoc %1 (:id %2) (uuid/next)) {} files)
         project (assoc project :id (uuid/next))
-        params  (assoc params :project-id (:id project))]
+        params  (assoc params
+                       :project-id (:id project)
+                       :index index)]
 
     (db/insert! conn :project project)
     (db/insert! conn :project-profile-rel {:project-id (:id project)
@@ -122,9 +167,11 @@
                                            :is-owner true
                                            :is-admin true
                                            :can-edit true})
-    (doseq [id (map :id files)]
-      (duplicate-file conn (assoc params :file-id id)))
-
+    (doseq [{:keys [id]} files]
+      (let [file   (db/get-by-id conn :file id)
+            params (assoc params :file file)]
+        (duplicate-file conn params {:reset-shared-flag false
+                                     :remap-libraries true})))
     project))
 
 
