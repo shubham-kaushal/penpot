@@ -11,11 +11,13 @@
   (:require
    [app.main.data.dashboard :as dd]
    [app.main.data.modal :as modal]
+   [app.main.repo :as rp]
    [app.main.store :as st]
    [app.main.ui.components.context-menu :refer [context-menu]]
    [app.util.dom :as dom]
    [app.util.i18n :as i18n :refer [tr]]
    [app.util.router :as rt]
+   [beicon.core :as rx]
    [rumext.alpha :as mf]))
 
 (mf/defc file-menu
@@ -24,8 +26,11 @@
   (assert (boolean? show?) "missing `show?` prop")
   (assert (fn? on-edit) "missing `on-edit` prop")
   (assert (fn? on-menu-close) "missing `on-menu-close` prop")
-  (let [top  (or top 0)
-        left (or left 0)
+  (let [top   (or top 0)
+        left  (or left 0)
+
+        teams (mf/use-state [])
+        _(js/console.log "teams" (clj->js @teams))
 
         on-new-tab
         (mf/use-callback
@@ -102,6 +107,14 @@
                        :cancel-label :omit
                        :accept-label (tr "modals.remove-shared-confirm.accept")
                        :on-accept del-shared}))))]
+
+    (mf/use-layout-effect
+      (mf/deps show?)
+      (fn []
+        (if show?
+          (->> (rp/query! :teams)
+               (rx/subs #(reset! teams %)))
+          (reset! teams []))))
 
     [:& context-menu {:on-close on-menu-close
                       :show show?

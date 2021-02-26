@@ -71,7 +71,6 @@
 
         exit-submenu
         (mf/use-callback
-         (mf/deps options)
          (fn [event]
            (dom/stop-propagation event)
            (swap! local update :levels pop)))
