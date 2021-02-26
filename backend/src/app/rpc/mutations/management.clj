@@ -178,38 +178,56 @@
 
 ;; --- MUTATION: Move file
 
-(declare move-file)
+(declare sql:retrieve-files)
+(declare sql:move-files)
+(declare sql:delete-broken-relations-for-files)
 
-(s/def ::move-file
-  (s/keys :req-un [::profile-id ::file-id ::project-id]))
+(s/def ::ids (s/every ::us/uuid :kind set?))
+(s/def ::move-files
+  (s/keys :req-un [::profile-id ::ids ::project-id]))
 
-(sv/defmethod ::move-file
-  [{:keys [pool] :as cfg} {:keys [profile-id file-id project-id] :as params}]
+(sv/defmethod ::move-files
+  [{:keys [pool] :as cfg} {:keys [profile-id ids project-id] :as params}]
   (db/with-atomic [conn pool]
-    (let [file           (db/get-by-id conn :file file-id {:columns [:id :project-id]})
-          src-project-id (:project-id file)
-          dst-project-id project-id]
+    (let [fids    (db/create-array conn "uuid" (into-array java.util.UUID ids))
+          files   (db/exec! conn [sql:retrieve-files fids])
+          source  (into #{} (map :project-id files))
 
-      (proj/check-edition-permissions! conn profile-id src-project-id)
-      (proj/check-edition-permissions! conn profile-id dst-project-id)
+          project (db/get-by-id conn :project project-id)
+          team-id (:team-id project)]
 
-      (when (= dst-project-id src-project-id)
+      ;; Check if we have permissions on the destination project
+      (proj/check-edition-permissions! conn profile-id project-id)
+
+      ;; Check if we have permissions on all source projects
+      (doseq [project-id source]
+        (proj/check-edition-permissions! conn profile-id project-id))
+
+      (when (contains? source project-id)
         (ex/raise :type :validation
                   :code :cant-move-to-same-project
                   :hint "Unable to move a file to the same project"))
 
-      (move-file conn {:profile-id profile-id
-                       :file-id file-id
-                       :src-project-id src-project-id
-                       :dst-project-id dst-project-id})
+      ;; move all files to the project
+      (db/exec-one! conn [sql:move-files project-id fids])
+
+      ;; delete posible broken relations
+      (db/exec-one! conn [sql:delete-broken-relations-for-files fids team-id])
+
       nil)))
 
-(def sql:delete-broken-library-relations-for-file
+(def sql:retrieve-files
+  "select id, project_id from file where id = ANY(?)")
+
+(def sql:move-files
+  "update file set project_id = ? where id = ANY(?)")
+
+(def sql:delete-broken-relations-for-files
   "with broken as (
      select * from file_library_rel as flr
       inner join file as lf on (flr.library_file_id = lf.id)
       inner join project as lp on (lf.project_id = lp.id)
-      where flr.file_id = ?
+      where flr.file_id = ANY(?)
         and lp.team_id != ?
    )
    delete from file_library_rel as rel
@@ -217,23 +235,6 @@
     where rel.file_id = br.file_id
       and rel.library_file_id = br.library_file_id")
 
-(defn- move-file
-  [conn {:keys [profile-id file-id src-project-id dst-project-id] :as params}]
-  (let [src-project (db/get-by-id conn :project src-project-id)
-        dst-project (db/get-by-id conn :project dst-project-id)
-        dst-team-id (:team-id dst-project)]
-
-    ;; Move file to the destination project
-    (db/update! conn :file
-                {:project-id dst-project-id}
-                {:id file-id})
-
-    ;; If the destination project is different from origin; then
-    ;; perform a cleanup of broken library relations.
-    (when (not= (:team-id src-project)
-                (:team-id dst-project))
-      (db/exec-one! conn [sql:delete-broken-library-relations-for-file
-                          file-id dst-team-id]))))
 
 ;; --- MUTATION: Move project
 

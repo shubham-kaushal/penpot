@@ -160,7 +160,6 @@
 
           )))))
 
-
 (t/deftest move-file-on-same-team
   (let [profile  (th/create-profile* 1 {:is-active true})
         team     (th/create-team* 1 {:profile-id (:id profile)})
@@ -181,10 +180,11 @@
                                :library-id (:id file2)})
 
     ;; Try to move to same project
-    (let [data  {::th/type :move-file
+    (let [data  {::th/type :move-files
                  :profile-id (:id profile)
-                 :file-id (:id file1)
-                 :project-id (:id project1)}
+                 :project-id (:id project1)
+                 :ids #{(:id file1)}}
+
           out   (th/mutation! data)
           error (:error out)]
       (t/is (th/ex-info? error))
@@ -200,10 +200,11 @@
       (t/is (= 0 (count rows))))
 
     ;; move a file1 to project2 (in the same team)
-    (let [data {::th/type :move-file
+    (let [data {::th/type :move-files
                 :profile-id (:id profile)
-                :file-id (:id file1)
-                :project-id (:id project2)}
+                :project-id (:id project2)
+                :ids #{(:id file1)}}
+
           out  (th/mutation! data)]
 
       (t/is (nil? (:error out)))
@@ -283,10 +284,10 @@
       (t/is (= 0 (count rows))))
 
     ;; move to other project in other team
-    (let [data {::th/type :move-file
+    (let [data {::th/type :move-files
                 :profile-id (:id profile)
-                :file-id (:id file1)
-                :project-id (:id project2)}
+                :project-id (:id project2)
+                :ids #{(:id file1)}}
           out  (th/mutation! data)]
 
       (t/is (nil? (:error out)))
