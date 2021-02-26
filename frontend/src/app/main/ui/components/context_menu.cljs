@@ -12,51 +12,11 @@
    [rumext.alpha :as mf]
    [goog.object :as gobj]
    [app.main.ui.components.dropdown :refer [dropdown']]
+   [app.main.ui.icons :as i]
    [app.common.uuid :as uuid]
    [app.util.data :refer [classnames]]
-   [app.util.dom :as dom]))
-
-;; (mf/defc context-submenu
-;;   {::mf/wrap-props false}
-;;   [props]
-;;   (assert (fn? (gobj/get props "on-close")) "missing `on-close` prop")
-;;   (assert (boolean? (gobj/get props "show")) "missing `show` prop")
-;;   (assert (vector? (gobj/get props "options")) "missing `options` prop")
-;;
-;;   (let [open? (gobj/get props "show")
-;;         options (gobj/get props "options")
-;;         selected (gobj/get props "selected")
-;;         top (gobj/get props "top" 0)
-;;         left (gobj/get props "left" 0)
-;;
-;;         offset (mf/use-state 0)
-;;
-;;         check-menu-offscreen
-;;         (mf/use-callback
-;;          (mf/deps top @offset)
-;;          (fn [node]
-;;            (when node
-;;              (let [{node-height :height}   (dom/get-bounding-rect node)
-;;                    {window-height :height} (dom/get-window-size)
-;;                    target-offset (if (> (+ top node-height) window-height)
-;;                                    (- node-height)
-;;                                    0)]
-;;
-;;                (if (not= target-offset @offset)
-;;                  (reset! offset target-offset))))))]
-;;
-;;     (when open?
-;;       [:> dropdown' props
-;;        [:div.context-menu {:class (classnames :is-open open?)
-;;                            :style {:top (+ top @offset)
-;;                                    :left left}}
-;;         [:ul.context-menu-items {:ref check-menu-offscreen}
-;;          (for [[action-name action-handler sub-options] options]
-;;            [:li.context-menu-item {:class (classnames :is-selected (and selected (= action-name selected)))
-;;                                    :key action-name}
-;;             [:a.context-menu-action {:on-click action-handler}
-;;              action-name]])]]])))
-
+   [app.util.dom :as dom]
+   [app.util.object :as obj]))
 
 (mf/defc context-menu
   {::mf/wrap-props false}
@@ -66,6 +26,7 @@
   (assert (vector? (gobj/get props "options")) "missing `options` prop")
 
   (let [open? (gobj/get props "show")
+        on-close (gobj/get props "on-close")
         options (gobj/get props "options")
         is-selectable (gobj/get props "selectable")
         selected (gobj/get props "selected")
@@ -73,16 +34,20 @@
         left (gobj/get props "left" 0)
         fixed? (gobj/get props "fixed?" false)
 
-        offset (mf/use-state 0)
+        local (mf/use-state {:offset 0
+                             :levels [{:parent-option nil
+                                       :options options}]})
 
-        on-submenu-close
+        on-local-close
         (mf/use-callback
-         (mf/deps options)
-         (fn [node]))
+          (fn []
+            (swap! local assoc :levels [{:parent-option nil
+                                         :options options}])
+            (on-close)))
 
         check-menu-offscreen
         (mf/use-callback
-         (mf/deps top @offset)
+         (mf/deps top (:offset @local))
          (fn [node]
            (when (and node (not fixed?))
              (let [{node-height :height}   (dom/get-bounding-rect node)
@@ -91,26 +56,59 @@
                                    (- node-height)
                                    0)]
 
-               (if (not= target-offset @offset)
-                 (reset! offset target-offset))))))]
+               (if (not= target-offset (:offset @local))
+                 (swap! local assoc :offset target-offset))))))
+
+        enter-submenu
+        (mf/use-callback
+         (mf/deps options)
+         (fn [option-name sub-options]
+           (fn [event]
+             (dom/stop-propagation event)
+             (swap! local update :levels
+                    conj {:parent-option option-name
+                          :options sub-options}))))
+
+        exit-submenu
+        (mf/use-callback
+         (mf/deps options)
+         (fn [event]
+           (dom/stop-propagation event)
+           (swap! local update :levels pop)))
+
+        props (obj/merge props #js {:on-close on-local-close})]
 
     (when open?
       [:> dropdown' props
        [:div.context-menu {:class (classnames :is-open open?
                                               :fixed fixed?
                                               :is-selectable is-selectable)
-                           :style {:top (+ top @offset)
+                           :style {:top (+ top (:offset @local))
                                    :left left}}
-        [:ul.context-menu-items {:ref check-menu-offscreen}
-         (for [[action-name action-handler sub-options] options]
-           (if (= action-name :separator)
-             [:li.separator]
-             [:li.context-menu-item {:class (classnames :is-selected (and selected (= action-name selected)))
-                                     :key action-name}
-              [:a.context-menu-action {:on-click action-handler}
-               action-name]
-              ;; (when (and sub-options false)
-              ;;   [:& context-submenu {:on-close on-submenu-close
-              ;;                        :show true
-              ;;                        :options sub-options}])
-              ]))]]])))
+        (let [level (-> @local :levels peek)]
+          [:ul.context-menu-items {:ref check-menu-offscreen}
+           (when-let [parent-option (:parent-option level)]
+             [:*
+              [:li.context-menu-item
+               [:a.context-menu-action.submenu-back
+                {:data-no-close true
+                 :on-click exit-submenu}
+                [:span i/arrow-slide]
+                parent-option]]
+              [:li.separator]])
+           (for [[option-name option-handler sub-options] (:options level)]
+             (if (= option-name :separator)
+               [:li.separator]
+               [:li.context-menu-item
+                {:class (classnames :is-selected (and selected
+                                                      (= option-name selected)))
+                 :key option-name}
+                (if-not sub-options
+                  [:a.context-menu-action {:on-click option-handler}
+                   option-name]
+                  [:a.context-menu-action.submenu
+                   {:data-no-close true
+                    :on-click (enter-submenu option-name sub-options)}
+                   option-name
+                   [:span i/arrow-slide]])
+                ]))])]])))

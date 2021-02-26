@@ -113,7 +113,7 @@
                                 [(tr "dashboard.duplicate") on-duplicate]
                                 [(tr "dashboard.move-to") nil
                                  [[(tr "labels.drafts") on-move]
-                                  ["Project-2" on-move]]]
+                                  [["Project-2" on-move]]]]
                                 (if (:is-shared file)
                                   [(tr "dashboard.remove-shared") on-del-shared]
                                   [(tr "dashboard.add-shared") on-add-shared])

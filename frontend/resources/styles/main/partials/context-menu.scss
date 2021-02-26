@@ -55,6 +55,30 @@
         color: $color-black;
         background-color: $color-primary-lighter;
     }
+
+    &.submenu {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+
+      & svg {
+        height: 10px;
+        width: 10px;
+      }
+    }
+
+    &.submenu-back {
+      color: $color-gray-30;
+      display: flex;
+      align-items: center;
+
+      & svg {
+        height: 10px;
+        width: 10px;
+        transform: rotate(180deg);
+        margin-right: $small;
+      }
+    }
 }
 
 .context-menu.is-selectable {
