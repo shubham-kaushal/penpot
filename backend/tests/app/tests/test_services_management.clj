@@ -231,7 +231,6 @@
 
 
 ;; TODO: move a library to other team
-
 (t/deftest move-file-to-other-team
   (let [profile  (th/create-profile* 1 {:is-active true})
         team     (th/create-team* 1 {:profile-id (:id profile)})
@@ -293,7 +292,7 @@
       (t/is (nil? (:error out)))
       (t/is (nil? (:result out)))
 
-      ;; project1 now should have 1 file
+      ;; project1 now should have 2 file
       (let [[item1 item2 :as rows] (db/query th/*pool* :file {:project-id (:id project1)}
                                       {:order-by [:created-at]})]
         ;; (clojure.pprint/pprint rows)
@@ -316,6 +315,76 @@
         (t/is (= (:library-file-id item) (:id file3))))
       )))
 
+
+(t/deftest move-library-to-other-team
+  (let [profile  (th/create-profile* 1 {:is-active true})
+        team     (th/create-team* 1 {:profile-id (:id profile)})
+
+        project1 (th/create-project* 1 {:team-id (:default-team-id profile)
+                                        :profile-id (:id profile)})
+
+        project2 (th/create-project* 2 {:team-id (:id team)
+                                        :profile-id (:id profile)})
+
+        file1   (th/create-file* 1 {:profile-id (:id profile)
+                                    :project-id (:id project1)})
+        file2   (th/create-file* 2 {:profile-id (:id profile)
+                                    :project-id (:id project1)
+                                    :is-shared true})]
+
+    (th/link-file-to-library* {:file-id (:id file1)
+                               :library-id (:id file2)})
+
+    ;; --- initial data checks
+
+    ;; the project1 should have 2 files
+    (let [rows (db/query th/*pool* :file {:project-id (:id project1)})]
+      (t/is (= 2 (count rows))))
+
+    ;; should be no files on project2
+    (let [rows (db/query th/*pool* :file {:project-id (:id project2)})]
+      (t/is (= 0 (count rows))))
+
+    ;; the file1 should be linked to file2
+    (let [[item :as rows] (db/query th/*pool* :file-library-rel {:file-id (:id file1)})]
+      (t/is (= 1 (count rows)))
+      (t/is (= (:file-id item) (:id file1)))
+      (t/is (= (:library-file-id item) (:id file2))))
+
+    ;; should be no libraries on file2
+    (let [rows (db/query th/*pool* :file-library-rel {:file-id (:id file2)})]
+      (t/is (= 0 (count rows))))
+
+    ;; move the library to other project
+    (let [data {::th/type :move-files
+                :profile-id (:id profile)
+                :project-id (:id project2)
+                :ids #{(:id file2)}}
+          out  (th/mutation! data)]
+
+      (t/is (nil? (:error out)))
+      (t/is (nil? (:result out)))
+
+      ;; project1 now should have 1 file
+      (let [[item :as rows] (db/query th/*pool* :file {:project-id (:id project1)}
+                                      {:order-by [:created-at]})]
+        (t/is (= 1 (count rows)))
+        (t/is (= (:id item) (:id file1))))
+
+      ;; project2 now should have 1 file
+      (let [[item :as rows] (db/query th/*pool* :file {:project-id (:id project2)})]
+        (t/is (= 1 (count rows)))
+        (t/is (= (:id item) (:id file2))))
+
+      ;; the file1 should not have any link to libraries
+      (let [rows (db/query th/*pool* :file-library-rel {:file-id (:id file1)})]
+        (t/is (zero? (count rows))))
+
+      ;; the file2 should not have any link to libraries
+      (let [rows (db/query th/*pool* :file-library-rel {:file-id (:id file2)})]
+        (t/is (zero? (count rows))))
+
+      )))
 
 (t/deftest move-project
   (let [profile  (th/create-profile* 1 {:is-active true})

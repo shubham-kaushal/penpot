@@ -180,7 +180,7 @@
 
 (declare sql:retrieve-files)
 (declare sql:move-files)
-(declare sql:delete-broken-relations-for-files)
+(declare sql:delete-broken-relations)
 
 (s/def ::ids (s/every ::us/uuid :kind set?))
 (s/def ::move-files
@@ -189,12 +189,14 @@
 (sv/defmethod ::move-files
   [{:keys [pool] :as cfg} {:keys [profile-id ids project-id] :as params}]
   (db/with-atomic [conn pool]
-    (let [fids    (db/create-array conn "uuid" (into-array java.util.UUID ids))
+    (let [fids    (->> (into-array java.util.UUID ids)
+                       (db/create-array conn "uuid"))
           files   (db/exec! conn [sql:retrieve-files fids])
-          source  (into #{} (map :project-id files))
+          source  (into #{} (map :project-id) files)
 
-          project (db/get-by-id conn :project project-id)
-          team-id (:team-id project)]
+          pids    (->> (conj source project-id)
+                       (into-array java.util.UUID)
+                       (db/create-array conn "uuid"))]
 
       ;; Check if we have permissions on the destination project
       (proj/check-edition-permissions! conn profile-id project-id)
@@ -211,8 +213,8 @@
       ;; move all files to the project
       (db/exec-one! conn [sql:move-files project-id fids])
 
-      ;; delete posible broken relations
-      (db/exec-one! conn [sql:delete-broken-relations-for-files fids team-id])
+      ;; delete posible broken relations on moved files
+      (db/exec-one! conn [sql:delete-broken-relations pids])
 
       nil)))
 
@@ -222,13 +224,15 @@
 (def sql:move-files
   "update file set project_id = ? where id = ANY(?)")
 
-(def sql:delete-broken-relations-for-files
+(def sql:delete-broken-relations
   "with broken as (
-     select * from file_library_rel as flr
-      inner join file as lf on (flr.library_file_id = lf.id)
-      inner join project as lp on (lf.project_id = lp.id)
-      where flr.file_id = ANY(?)
-        and lp.team_id != ?
+     (select * from file_library_rel as flr
+       inner join file as f on (flr.file_id = f.id)
+       inner join project as p on (f.project_id = p.id)
+       inner join file as lf on (flr.library_file_id = lf.id)
+       inner join project as lp on (lf.project_id = lp.id)
+       where p.id = ANY(?)
+         and lp.team_id != p.team_id)
    )
    delete from file_library_rel as rel
     using broken as br
@@ -246,44 +250,27 @@
 (sv/defmethod ::move-project
   [{:keys [pool] :as cfg} {:keys [profile-id team-id project-id] :as params}]
   (db/with-atomic [conn pool]
-    (let [project     (db/get-by-id conn :project project-id {:columns [:id :team-id]})
-          src-team-id (:team-id project)
-          dst-team-id team-id]
+    (let [project (db/get-by-id conn :project project-id {:columns [:id :team-id]})
 
+          pids    (->> (db/query conn :project {:team-id (:team-id project)} {:columns [:id]})
+                       (map :id)
+                       (into-array java.util.UUID)
+                       (db/create-array conn "uuid"))]
 
-      (teams/check-edition-permissions! conn profile-id src-team-id)
-      (teams/check-edition-permissions! conn profile-id dst-team-id)
+      (teams/check-edition-permissions! conn profile-id (:team-id project))
+      (teams/check-edition-permissions! conn profile-id team-id)
 
-      (when (= src-team-id dst-team-id)
+      (when (= team-id (:team-id project))
         (ex/raise :type :validation
                   :code :cant-move-to-same-team
                   :hint "Unable to move a project to same team"))
 
-      (move-project conn {:profile-id profile-id
-                          :project-id project-id
-                          :src-team-id src-team-id
-                          :dst-team-id dst-team-id})
+      ;; move project to the destination team
+      (db/update! conn :project
+                  {:team-id team-id}
+                  {:id project-id})
+
+      ;; delete posible broken relations on moved files
+      (db/exec-one! conn [sql:delete-broken-relations pids])
+
       nil)))
-
-
-(def sql:delete-broken-library-relations-for-project
-  "with broken as (
-     select * from file_library_rel as flr
-      inner join file as f on (flr.file_id = f.id)
-      inner join file as lf on (flr.library_file_id = lf.id)
-      inner join project as lp on (lf.project_id = lp.id)
-      where f.project_id = ?
-        and lp.team_id != ?
-   )
-   delete from file_library_rel as rel
-    using broken as br
-    where rel.file_id = br.file_id
-      and rel.library_file_id = br.library_file_id")
-
-(defn- move-project
-  [conn {:keys [profile-id project-id src-team-id dst-team-id] :as params}]
-  (db/update! conn :project
-              {:team-id dst-team-id}
-              {:id project-id})
-  (db/exec-one! conn [sql:delete-broken-library-relations-for-project
-                      project-id dst-team-id]))
