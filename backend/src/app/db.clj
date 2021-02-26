@@ -222,9 +222,10 @@
 (defn get-by-params
   ([ds table params]
    (get-by-params ds table params nil))
-  ([ds table params opts]
+  ([ds table params {:keys [uncheked] :or {uncheked false} :as opts}]
    (let [res (exec-one! ds (sql/select table params opts))]
-     (when (or (:deleted-at res) (not res))
+     (when (and (not uncheked)
+                (or (:deleted-at res) (not res)))
        (ex/raise :type :not-found
                  :hint "database object not found"))
      res)))

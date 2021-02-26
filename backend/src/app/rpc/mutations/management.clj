@@ -10,6 +10,7 @@
 (ns app.rpc.mutations.management
   "Move & Duplicate RPC methods for files and projects."
   (:require
+   [app.common.exceptions :as ex]
    [app.common.data :as d]
    [app.common.pages.migrations :as pmg]
    [app.common.spec :as us]
@@ -177,19 +178,111 @@
 
 ;; --- MUTATION: Move file
 
+(declare move-file)
+
 (s/def ::move-file
   (s/keys :req-un [::profile-id ::file-id ::project-id]))
 
 (sv/defmethod ::move-file
   [{:keys [pool] :as cfg} {:keys [profile-id file-id project-id] :as params}]
-  (db/with-atomic [conn pool]))
+  (db/with-atomic [conn pool]
+    (let [file           (db/get-by-id conn :file file-id {:columns [:id :project-id]})
+          src-project-id (:project-id file)
+          dst-project-id project-id]
 
+      (proj/check-edition-permissions! conn profile-id src-project-id)
+      (proj/check-edition-permissions! conn profile-id dst-project-id)
+
+      (when (= dst-project-id src-project-id)
+        (ex/raise :type :validation
+                  :code :cant-move-to-same-project
+                  :hint "Unable to move a file to the same project"))
+
+      (move-file conn {:profile-id profile-id
+                       :file-id file-id
+                       :src-project-id src-project-id
+                       :dst-project-id dst-project-id})
+      nil)))
+
+(def sql:delete-broken-library-relations-for-file
+  "with broken as (
+     select * from file_library_rel as flr
+      inner join file as lf on (flr.library_file_id = lf.id)
+      inner join project as lp on (lf.project_id = lp.id)
+      where flr.file_id = ?
+        and lp.team_id != ?
+   )
+   delete from file_library_rel as rel
+    using broken as br
+    where rel.file_id = br.file_id
+      and rel.library_file_id = br.library_file_id")
+
+(defn- move-file
+  [conn {:keys [profile-id file-id src-project-id dst-project-id] :as params}]
+  (let [src-project (db/get-by-id conn :project src-project-id)
+        dst-project (db/get-by-id conn :project dst-project-id)
+        dst-team-id (:team-id dst-project)]
+
+    ;; Move file to the destination project
+    (db/update! conn :file
+                {:project-id dst-project-id}
+                {:id file-id})
+
+    ;; If the destination project is different from origin; then
+    ;; perform a cleanup of broken library relations.
+    (when (not= (:team-id src-project)
+                (:team-id dst-project))
+      (db/exec-one! conn [sql:delete-broken-library-relations-for-file
+                          file-id dst-team-id]))))
 
 ;; --- MUTATION: Move project
+
+(declare move-project)
 
 (s/def ::move-project
   (s/keys :req-un [::profile-id ::team-id ::project-id]))
 
 (sv/defmethod ::move-project
   [{:keys [pool] :as cfg} {:keys [profile-id team-id project-id] :as params}]
-  (db/with-atomic [conn pool]))
+  (db/with-atomic [conn pool]
+    (let [project     (db/get-by-id conn :project project-id {:columns [:id :team-id]})
+          src-team-id (:team-id project)
+          dst-team-id team-id]
+
+
+      (teams/check-edition-permissions! conn profile-id src-team-id)
+      (teams/check-edition-permissions! conn profile-id dst-team-id)
+
+      (when (= src-team-id dst-team-id)
+        (ex/raise :type :validation
+                  :code :cant-move-to-same-team
+                  :hint "Unable to move a project to same team"))
+
+      (move-project conn {:profile-id profile-id
+                          :project-id project-id
+                          :src-team-id src-team-id
+                          :dst-team-id dst-team-id})
+      nil)))
+
+
+(def sql:delete-broken-library-relations-for-project
+  "with broken as (
+     select * from file_library_rel as flr
+      inner join file as f on (flr.file_id = f.id)
+      inner join file as lf on (flr.library_file_id = lf.id)
+      inner join project as lp on (lf.project_id = lp.id)
+      where f.project_id = ?
+        and lp.team_id != ?
+   )
+   delete from file_library_rel as rel
+    using broken as br
+    where rel.file_id = br.file_id
+      and rel.library_file_id = br.library_file_id")
+
+(defn- move-project
+  [conn {:keys [profile-id project-id src-team-id dst-team-id] :as params}]
+  (db/update! conn :project
+              {:team-id dst-team-id}
+              {:id project-id})
+  (db/exec-one! conn [sql:delete-broken-library-relations-for-project
+                      project-id dst-team-id]))
