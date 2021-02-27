@@ -5,13 +5,13 @@
 ;; This Source Code Form is "Incompatible With Secondary Licenses", as
 ;; defined by the Mozilla Public License, v. 2.0.
 ;;
-;; Copyright (c) 2020 UXBOX Labs SL
+;; Copyright (c) 2021 UXBOX Labs SL
 
 (ns app.rpc.mutations.management
   "Move & Duplicate RPC methods for files and projects."
   (:require
-   [app.common.exceptions :as ex]
    [app.common.data :as d]
+   [app.common.exceptions :as ex]
    [app.common.pages.migrations :as pmg]
    [app.common.spec :as us]
    [app.common.uuid :as uuid]
