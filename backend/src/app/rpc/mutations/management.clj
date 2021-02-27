@@ -189,13 +189,10 @@
 (sv/defmethod ::move-files
   [{:keys [pool] :as cfg} {:keys [profile-id ids project-id] :as params}]
   (db/with-atomic [conn pool]
-    (let [fids    (->> (into-array java.util.UUID ids)
-                       (db/create-array conn "uuid"))
+    (let [fids    (db/create-array conn "uuid" ids)
           files   (db/exec! conn [sql:retrieve-files fids])
           source  (into #{} (map :project-id) files)
-
           pids    (->> (conj source project-id)
-                       (into-array java.util.UUID)
                        (db/create-array conn "uuid"))]
 
       ;; Check if we have permissions on the destination project
@@ -254,7 +251,6 @@
 
           pids    (->> (db/query conn :project {:team-id (:team-id project)} {:columns [:id]})
                        (map :id)
-                       (into-array java.util.UUID)
                        (db/create-array conn "uuid"))]
 
       (teams/check-edition-permissions! conn profile-id (:team-id project))
